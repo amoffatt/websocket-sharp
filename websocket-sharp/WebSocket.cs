@@ -47,6 +47,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Net.Security;
 using System.Net.Sockets;
+using System.Runtime.Remoting.Channels;
 using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
@@ -109,6 +110,7 @@ namespace WebSocketSharp
     private bool                           _protocolsRequested;
     private NetworkCredential              _proxyCredentials;
     private Uri                            _proxyUri;
+    private bool                           _forceBasicAuth;
     private volatile WebSocketState        _readyState;
     private ManualResetEvent               _receivingExited;
     private int                            _retryCountForConnect;
@@ -2076,38 +2078,52 @@ namespace WebSocketSharp
     private void sendProxyConnectRequest ()
     {
       var req = HttpRequest.CreateConnectRequest (_uri);
-      var res = sendHttpRequest (req, 90000);
-      if (res.IsProxyAuthenticationRequired) {
-        var chal = res.Headers["Proxy-Authenticate"];
-        _logger.Warn (
-          String.Format ("Received a proxy authentication requirement for '{0}'.", chal));
+      HttpResponse res;
+      
+      if (_forceBasicAuth)
+      {
+        var authChal = AuthenticationChallenge.CreateBasicChallenge("");
+        res = sendAuthorizedRequest(req, authChal);
+      }
+      else
+      {
+        res = sendHttpRequest (req, 90000);
+        if (res.IsProxyAuthenticationRequired) {
+          var chal = res.Headers["Proxy-Authenticate"];
+          _logger.Warn (
+            String.Format ("Received a proxy authentication requirement for '{0}'.", chal));
 
-        if (chal.IsNullOrEmpty ())
-          throw new WebSocketException ("No proxy authentication challenge is specified.");
+          if (chal.IsNullOrEmpty ())
+            throw new WebSocketException ("No proxy authentication challenge is specified.");
 
-        var authChal = AuthenticationChallenge.Parse (chal);
-        if (authChal == null)
-          throw new WebSocketException ("An invalid proxy authentication challenge is specified.");
+          var authChal = AuthenticationChallenge.Parse (chal);
+          if (authChal == null)
+            throw new WebSocketException ("An invalid proxy authentication challenge is specified.");
 
-        if (_proxyCredentials != null) {
-          if (res.HasConnectionClose) {
-            releaseClientResources ();
-            _tcpClient = new TcpClient (_proxyUri.DnsSafeHost, _proxyUri.Port);
-            _stream = _tcpClient.GetStream ();
+          if (_proxyCredentials != null) {
+            if (res.HasConnectionClose) {
+              releaseClientResources ();
+              _tcpClient = new TcpClient (_proxyUri.DnsSafeHost, _proxyUri.Port);
+              _stream = _tcpClient.GetStream ();
+            }
+
+            res = sendAuthorizedRequest(req, authChal);
           }
-
-          var authRes = new AuthenticationResponse (authChal, _proxyCredentials, 0);
-          req.Headers["Proxy-Authorization"] = authRes.ToString ();
-          res = sendHttpRequest (req, 15000);
+          if (res.IsProxyAuthenticationRequired)
+            throw new WebSocketException ("A proxy authentication is required.");
         }
-
-        if (res.IsProxyAuthenticationRequired)
-          throw new WebSocketException ("A proxy authentication is required.");
       }
 
       if (res.StatusCode[0] != '2')
         throw new WebSocketException (
           "The proxy has failed a connection to the requested host and port.");
+    }
+    
+    private HttpResponse sendAuthorizedRequest(HttpRequest req, AuthenticationChallenge authChal)
+    {
+      var authRes = new AuthenticationResponse (authChal, _proxyCredentials, 0);
+      req.Headers["Proxy-Authorization"] = authRes.ToString ();
+      return sendHttpRequest (req, 15000);
     }
 
     // As client
@@ -3994,7 +4010,7 @@ namespace WebSocketSharp
     ///   <paramref name="password"/> contains an invalid character.
     ///   </para>
     /// </exception>
-    public void SetProxy (string url, string username, string password)
+    public void SetProxy (string url, string username, string password, bool forceBasicAuth=false)
     {
       string msg = null;
 
@@ -4064,6 +4080,7 @@ namespace WebSocketSharp
                                 )
                               )
                             : null;
+        _forceBasicAuth = forceBasicAuth;
       }
     }
 
